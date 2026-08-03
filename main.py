@@ -15,7 +15,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ID чата анкетологов (обязательно с минусом, если это супергруппа/группа)
-MODERATOR_CHAT_ID = -4456272439  
+MODERATOR_CHAT_ID = 4456272439  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
 def init_db():
