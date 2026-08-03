@@ -15,7 +15,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Сюда вставьте правильный ID группы после того, как узнаете его через команду /myid
-MODERATOR_CHAT_ID = -1004456272439  
+MODERATOR_CHAT_ID = "-1004456272439"
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
 def init_db():
