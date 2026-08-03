@@ -36,7 +36,7 @@ def init_db():
 
 init_db()
 
-# Временное хранилище для сбора анкет (текст + фото)
+# Временное хранилище для сбора анкет (текст, статьи, фото)
 active_sessions = {}
 
 # --- КЛАВИАТУРЫ ---
@@ -77,8 +77,11 @@ async def go_home(callback: types.CallbackQuery):
 async def start_submit(callback: types.CallbackQuery):
     active_sessions[callback.from_user.id] = {"step": "collecting", "messages": [], "photos": []}
     await callback.message.edit_text(
-        "✍️ Отправляй свою анкету **любым количеством текстовых сообщений** и прикрепляй **до 3 фотографий** (по одной или с текстом).\n\n"
-        "Когда закончишь отправлять всё, нажми кнопку ниже:",
+        "✍️ Отправляй свою анкету частями:\n"
+        "• Текстовые сообщения\n"
+        "• **Статьи Telegram** (ссылки на статьи)\n"
+        "• **До 3 фотографий**\n\n"
+        "Можешь отправлять их вперемешку. Когда закончишь, нажми кнопку ниже:",
         reply_markup=get_finish_keyboard()
     )
     await callback.answer()
@@ -88,7 +91,7 @@ async def start_submit(callback: types.CallbackQuery):
 async def cmd_myid(message: types.Message):
     await message.answer(f"📌 ID этого чата: `{message.chat.id}`")
 
-# --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ (С КНОПКАМИ ДО 5 ШТУК) ---
+# --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ ---
 @dp.message(Command("list"))
 async def mod_list_tickets(message: types.Message):
     if str(message.chat.id) != str(MODERATOR_CHAT_ID):
@@ -135,7 +138,7 @@ async def view_ticket_button(callback: types.CallbackQuery):
         f"📄 **Информация по тикету #{ticket_id}**\n"
         f"👤 Игрок: {username} (ID: `{user_id}`)\n"
         f"Статус: {status_text}\n\n"
-        f"__Текст анкеты:__\n{text_content}"
+        f"__Текст / статьи анкеты:__\n{text_content}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -195,7 +198,7 @@ async def handle_mod_reply(message: types.Message):
     except Exception as e:
         await message.reply(f"⚠️ Не удалось отправить сообщение игроку (возможно, он заблокировал бота). Ошибка: {e}")
 
-# --- СБОР ТЕКСТА АНКЕТЫ ОТ ИГРОКА ---
+# --- СБОР ТЕКСТА И СТАТЕЙ ТЕЛЕГРАМ ОТ ИГРОКА ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
     if message.chat.type != "private":
@@ -204,8 +207,14 @@ async def process_user_text(message: types.Message):
     user_id = message.from_user.id
     
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
-        active_sessions[user_id]["messages"].append(message.text)
-        await message.answer("➕ Текст принят! Можешь отправить еще текст или фото, либо нажать кнопку отправки.", reply_markup=get_finish_keyboard())
+        # Если игрок прислал ссылку на телеграм-статью или обычный текст
+        content = message.text
+        if message.entities:
+            # Можно дополнительно обрабатывать сущности, если нужно, но текст со ссылкой подхватится автоматически
+            pass
+
+        active_sessions[user_id]["messages"].append(content)
+        await message.answer("➕ Материал (текст / статья) успешно добавлен! Можешь отправить ещё или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
 # --- СБОР ФОТОГРАФИЙ ОТ ИГРОКА (ДО 3 ШТУК) ---
@@ -229,10 +238,10 @@ async def process_user_photo(message: types.Message):
             session["messages"].append(message.caption)
 
         count = len(session["photos"])
-        await message.answer(f"📸 Фото принято ({count}/3)! Можешь отправить еще фото/текст или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
+        await message.answer(f"📸 Фото принято ({count}/3)! Можешь отправить еще материалы или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ И ФОТО МОДЕРАТОРАМ ---
+# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ МОДЕРАТОРАМ (СНАЧАЛА ФОТО, ПОТОМ ТЕКСТ/СТАТЬИ) ---
 @dp.callback_query(F.data == "finish_submit")
 async def finish_submit(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -242,9 +251,9 @@ async def finish_submit(callback: types.CallbackQuery):
 
     session = active_sessions[user_id]
     if not session["messages"] and not session["photos"]:
-        return await callback.answer("Ты не отправил ни текста, ни фотографий!", show_alert=True)
+        return await callback.answer("Ты не отправил ни текста, ни статей, ни фотографий!", show_alert=True)
 
-    full_ticket_text = "\n\n".join(session["messages"]) if session["messages"] else "(Без текста)"
+    full_ticket_text = "\n\n".join(session["messages"]) if session["messages"] else "(Без текста и статей)"
     photos = session["photos"]
     
     username = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
@@ -263,7 +272,7 @@ async def finish_submit(callback: types.CallbackQuery):
     del active_sessions[user_id]
 
     mod_text = (
-        f"📥 **Новая анкета на проверку!** (Тикет #{ticket_id})\n"
+        f"📥 **Новая анкета / статья на проверку!** (Тикет #{ticket_id})\n"
         f"👤 От: {username} (ID: `{user_id}`)\n\n"
         f"{full_ticket_text}"
     )
@@ -273,7 +282,7 @@ async def finish_submit(callback: types.CallbackQuery):
     ])
 
     try:
-        # 1. Сначала отправляем фотографии (если они есть)
+        # 1. Сначала отправляем фотографии альбомом (если они есть)
         if photos:
             media = []
             for i, p_id in enumerate(photos):
@@ -284,7 +293,7 @@ async def finish_submit(callback: types.CallbackQuery):
             
             await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
 
-        # 2. Затем отправляем текст анкеты с кнопкой закрытия и сохраняем его ID для реплаев
+        # 2. Затем отправляем текст и ссылки на телеграм-статьи с кнопкой закрытия тикета
         sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
         
         conn = sqlite3.connect("bot_database.db")
@@ -298,7 +307,7 @@ async def finish_submit(callback: types.CallbackQuery):
         return await callback.message.edit_text(f"⚠️ Ошибка отправки модераторам: {e}")
 
     await callback.message.edit_text(
-        "✅ Твоя анкета и фотографии успешно отправлены анкетологам на проверку!\nОжидай ответа.",
+        "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nОжидай ответа.",
         reply_markup=get_home_keyboard()
     )
     await callback.answer()
