@@ -40,6 +40,14 @@ def init_db():
             PRIMARY KEY (message_id, chat_id)
         )
     """)
+    # Таблица забаненных пользователей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            reason TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -62,6 +70,14 @@ def get_ticket_by_message(message_id: int, chat_id: int):
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
+
+def is_user_banned(user_id: int) -> bool:
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
 
 # --- КЛАВИАТУРЫ ---
 def get_home_keyboard():
@@ -94,12 +110,19 @@ async def cmd_start(message: types.Message):
     if message.chat.type != "private":
         return await message.answer("Этот бот принимает анкеты только в личных сообщениях!")
     
+    user_id = message.from_user.id
+    if is_user_banned(user_id):
+        return await message.answer("❌ Вы заблокированы в этом боте и не можете отправлять анкеты.")
+    
     text = "Привет! Это бот для отправки анкет на проверку анкетологам.\n\nНажми кнопку ниже, чтобы начать заполнение:"
     await message.answer(text, reply_markup=get_home_keyboard())
 
 @dp.callback_query(F.data == "go_home")
 async def go_home(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        return await callback.answer("❌ Вы заблокированы.", show_alert=True)
+
     if user_id in active_sessions:
         del active_sessions[user_id]
     
@@ -112,7 +135,11 @@ async def go_home(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "start_submit")
 async def start_submit(callback: types.CallbackQuery):
-    active_sessions[callback.from_user.id] = {"step": "collecting", "messages": [], "photos": []}
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        return await callback.answer("❌ Вы заблокированы в этом боте.", show_alert=True)
+
+    active_sessions[user_id] = {"step": "collecting", "messages": [], "photos": []}
     try:
         await callback.message.edit_text(
             "✍️ Отправляй свою анкету частями:\n"
@@ -206,7 +233,6 @@ async def close_ticket(callback: types.CallbackQuery):
         cursor.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (ticket_id,))
         conn.commit()
 
-        # Уведомляем игрока о закрытии тикета
         try:
             await bot.send_message(user_id, f"🔒 **Ваша анкета (Тикет #{ticket_id}) закрыта анкетологами.** Переписка завершена.")
         except Exception:
@@ -225,12 +251,122 @@ async def close_ticket(callback: types.CallbackQuery):
     await callback.answer("Тикет успешно закрыт!", show_alert=True)
 
 
+# --- КОМАНДЫ БАНА И РАЗБАНА (;бан / ;разбан) ---
+@dp.message(F.text.startswith(";бан") & (F.chat.id == int(MODERATOR_CHAT_ID)))
+async def cmd_ban(message: types.Message):
+    parts = message.text.split(maxsplit=2)
+    reason = parts[2] if len(parts) > 2 else "Причина не указана"
+    target_user_id = None
+    target_username = None
+
+    # Способ 1: Реплаем на сообщение
+    if message.reply_to_message:
+        replied_msg_id = message.reply_to_message.message_id
+        ticket_id = get_ticket_by_message(replied_msg_id, message.chat.id)
+        if ticket_id:
+            conn = sqlite3.connect("bot_database.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, username FROM tickets WHERE id = ?", (ticket_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                target_user_id, target_username = row[0], row[1]
+    
+    # Способ 2: Через аргумент (@юзернейм или ID)
+    elif len(parts) > 1:
+        arg = parts[1]
+        conn = sqlite3.connect("bot_database.db")
+        cursor = conn.cursor()
+        if arg.startswith("@"):
+            cursor.execute("SELECT user_id, username FROM tickets WHERE username = ? ORDER BY id DESC LIMIT 1", (arg,))
+        elif arg.isdigit():
+            target_user_id = int(arg)
+            cursor.execute("SELECT username FROM tickets WHERE user_id = ? ORDER BY id DESC LIMIT 1", (target_user_id,))
+            res = cursor.fetchone()
+            target_username = res[0] if res else f"ID: {target_user_id}"
+        
+        row = cursor.fetchone() if arg.startswith("@") else None
+        if row:
+            target_user_id, target_username = row[0], row[1]
+        conn.close()
+
+    if not target_user_id:
+        return await message.reply("⚠️ Не удалось определить пользователя. Укажите @юзернейм, ID или сделайте Reply на его тикет/сообщение.")
+
+    # Заносим в базу забаненных
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO banned_users (user_id, username, reason) VALUES (?, ?, ?)", (target_user_id, str(target_username), reason))
+    conn.commit()
+    conn.close()
+
+    # Закрываем активный тикет пользователя, если он был
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tickets SET status = 'closed' WHERE user_id = ? AND status = 'pending'", (target_user_id,))
+    conn.commit()
+    conn.close()
+
+    try:
+        await bot.send_message(target_user_id, f"❌ **Вы были заблокированы администрацией.**\nПричина: {reason}")
+    except Exception:
+        pass
+
+    await message.reply(f"🔨 Пользователь `{target_username}` (ID: `{target_user_id}`) успешно заблокирован.\nПричина: {reason}")
+
+
+@dp.message(F.text.startswith(";разбан") & (F.chat.id == int(MODERATOR_CHAT_ID)))
+async def cmd_unban(message: types.Message):
+    parts = message.text.split(maxsplit=1)
+    target_user_id = None
+    target_identifier = None
+
+    if message.reply_to_message:
+        replied_msg_id = message.reply_to_message.message_id
+        ticket_id = get_ticket_by_message(replied_msg_id, message.chat.id)
+        if ticket_id:
+            conn = sqlite3.connect("bot_database.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                target_user_id = row[0]
+    elif len(parts) > 1:
+        arg = parts[1]
+        conn = sqlite3.connect("bot_database.db")
+        cursor = conn.cursor()
+        if arg.startswith("@"):
+            cursor.execute("SELECT user_id FROM banned_users WHERE username = ?", (arg,))
+            row = cursor.fetchone()
+            if row:
+                target_user_id = row[0]
+        elif arg.isdigit():
+            target_user_id = int(arg)
+        conn.close()
+
+    if not target_user_id:
+        return await message.reply("⚠️ Не удалось определить пользователя для разбана. Укажите @юзернейм, ID или сделайте Reply.")
+
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (target_user_id,))
+    conn.commit()
+    conn.close()
+
+    try:
+        await bot.send_message(target_user_id, "✅ **Вы были разблокированы!** Теперь вы снова можете пользоваться ботом.")
+    except Exception:
+        pass
+
+    await message.reply(f"🔓 Пользователь с ID `{target_user_id}` успешно разблокирован.")
+
+
 # --- ДВУСТОРОННЯЯ ПЕРЕПИСКА ЧЕРЕЗ REPLY ---
 
-# 1. Ответ МОДЕРАТОРА игроку (через Reply в чате модераторов)
 @dp.message(F.reply_to_message & (F.chat.id == int(MODERATOR_CHAT_ID)))
 async def handle_mod_reply(message: types.Message):
-    if message.from_user.is_bot:
+    if message.from_user.is_bot or message.text.startswith(";"):
         return
 
     replied_msg_id = message.reply_to_message.message_id
@@ -256,7 +392,6 @@ async def handle_mod_reply(message: types.Message):
             user_id,
             f"📬 **Ответ от анкетологов (Тикет #{ticket_id}):**\n\n{admin_answer}"
         )
-        # Сохраняем маппинг, чтобы игрок мог ответить реплаем на это сообщение
         map_message(sent_to_user.message_id, user_id, ticket_id)
         map_message(message.message_id, int(MODERATOR_CHAT_ID), ticket_id)
         
@@ -265,20 +400,21 @@ async def handle_mod_reply(message: types.Message):
         await message.reply(f"⚠️ Не удалось отправить сообщение игроку: {e}")
 
 
-# 2. Ответ УЧАСТНИКА модераторам (через Reply в личных сообщениях с ботом)
 @dp.message(F.reply_to_message & F.chat.type.in_({"private"}))
 async def handle_user_reply(message: types.Message):
     if message.from_user.is_bot or message.text.startswith("/"):
         return
 
     user_id = message.from_user.id
+    if is_user_banned(user_id):
+        return await message.answer("❌ Вы заблокированы в этом боте.")
+
     replied_msg_id = message.reply_to_message.message_id
     ticket_id = get_ticket_by_message(replied_msg_id, user_id)
 
     if not ticket_id:
-        return # Если человек реплаит на какое-то старое/стороннее сообщение, не относящееся к тикету
+        return
 
-    # Проверяем, активен ли еще тикет
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("SELECT status FROM tickets WHERE id = ? AND user_id = ?", (ticket_id, user_id))
@@ -293,28 +429,26 @@ async def handle_user_reply(message: types.Message):
 
     try:
         sent_to_mod = await bot.send_message(MODERATOR_CHAT_ID, forward_text)
-        # Мапим отправленное сообщение у модераторов, чтобы они могли ответить на него реплаем
         map_message(sent_to_mod.message_id, int(MODERATOR_CHAT_ID), ticket_id)
         await message.answer("✅ Ваше сообщение отправлено анкетологам.")
     except Exception as e:
         await message.answer(f"⚠️ Ошибка отправки модераторам: {e}")
 
 
-# 3. Обычный текст от игрока (Сбор анкеты ИЛИ обычное сообщение при активном тикете)
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
     if message.chat.type != "private":
         return
 
     user_id = message.from_user.id
+    if is_user_banned(user_id):
+        return await message.answer("❌ Вы заблокированы в этом боте.")
     
-    # Сценарий А: Игрок заполняет анкету
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
         active_sessions[user_id]["messages"].append(message.text)
         await message.answer("➕ Материал (текст / статья) успешно добавлен! Можешь отправить ещё или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-    # Сценарий Б: У игрока есть активный тикет (если он пишет просто текстом без реплая)
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND status = 'pending'", (user_id,))
@@ -334,16 +468,17 @@ async def process_user_text(message: types.Message):
             await message.answer(f"⚠️ Ошибка отправки сообщения модераторам: {e}")
         return
 
-    # Сценарий В: Нет ни сессии, ни активного тикета
     await message.answer("Нажми кнопку ниже, чтобы отправить анкету:", reply_markup=get_home_keyboard())
 
-# --- СБОР ФОТОГРАФИЙ ОТ ИГРОКА (ДО 3 ШТУК) ---
+
 @dp.message(F.photo)
 async def process_user_photo(message: types.Message):
     if message.chat.type != "private":
         return
 
     user_id = message.from_user.id
+    if is_user_banned(user_id):
+        return await message.answer("❌ Вы заблокированы в этом боте.")
 
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
         session = active_sessions[user_id]
@@ -361,10 +496,12 @@ async def process_user_photo(message: types.Message):
         await message.answer(f"📸 Фото принято ({count}/3)! Можешь отправить еще материалы или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ МОДЕРАТОРАМ ---
+
 @dp.callback_query(F.data == "finish_submit")
 async def finish_submit(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        return await callback.answer("❌ Вы заблокированы.", show_alert=True)
     
     if user_id not in active_sessions:
         return await callback.answer("Сессия не найдена, начни заново.", show_alert=True)
@@ -378,7 +515,6 @@ async def finish_submit(callback: types.CallbackQuery):
     
     username = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
 
-    # Сохраняем в базу данных
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -394,46 +530,4 @@ async def finish_submit(callback: types.CallbackQuery):
     mod_text = (
         f"📥 **Новая анкета / статья на проверку!** (Тикет #{ticket_id})\n"
         f"👤 От: {username} (ID: `{user_id}`)\n\n"
-        f"{full_ticket_text}"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"close_ticket:{ticket_id}")]
-    ])
-
-    try:
-        if photos:
-            media = []
-            for i, p_id in enumerate(photos):
-                if i == 0:
-                    media.append(InputMediaPhoto(media=p_id, caption=f"🖼 Фотографии к тикету #{ticket_id}"))
-                else:
-                    media.append(InputMediaPhoto(media=p_id))
-            
-            await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
-
-        sent_msg = await send_long_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
-        if sent_msg:
-            map_message(sent_msg.message_id, int(MODERATOR_CHAT_ID), ticket_id)
-
-    except Exception as e:
-        print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
-        return await callback.message.edit_text(f"⚠️ Ошибка отправки модераторам: {e}")
-
-    try:
-        await callback.message.edit_text(
-            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nТеперь вы можете отвечать на сообщения модераторов в этом чате до закрытия тикета.",
-            reply_markup=None
-        )
-    except Exception:
-        pass
-        
-    await callback.answer()
-
-
-async def main():
-    print("Бот успешно запущен!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    
