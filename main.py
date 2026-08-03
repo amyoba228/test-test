@@ -14,8 +14,8 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Сюда мы временно вставили стандартный ID. 
-# Если бот напишет ошибку, мы заменим его на тот, который увидим в консоли.
+# Сюда мы временно вставили старый ID. 
+# Как только узнаешь правильный через подсказку в чате, заменишь его здесь.
 MODERATOR_CHAT_ID = -4456272439  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
@@ -198,11 +198,11 @@ async def process_user_text(message: types.Message):
         reply_markup=get_home_keyboard()
     )
 
-# --- ПОМОЩНИК ДЛЯ ПОИСКА АЙДИ ЧАТА ---
+# --- ПОМОЩНИК: ВЫВОД АЙДИ В САМОЙ ГРУППЕ ---
 @dp.message()
-async def catch_all_chats(message: types.Message):
+async def show_chat_id(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
-        print(f"📌 АЙДИ ЭТОЙ ГРУППЫ: {message.chat.id}")
+        await message.answer(f"📌 Айди этого чата: `{message.chat.id}`")
 
 
 async def main():
