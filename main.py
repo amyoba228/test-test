@@ -14,8 +14,8 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ID чата анкетологов (обязательно с минусом, если это супергруппа/группа)
-MODERATOR_CHAT_ID = 4456272439  
+# ID чата анкетологов (обязательно с минусом для групп/супергрупп)
+MODERATOR_CHAT_ID = -4456272439  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
 def init_db():
@@ -75,7 +75,6 @@ async def start_submit(callback: types.CallbackQuery):
 # --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ ---
 @dp.message(Command("list"))
 async def mod_list_tickets(message: types.Message):
-    # Проверяем, что команда вызвана в чате анкетологов
     if message.chat.id != MODERATOR_CHAT_ID:
         return
 
@@ -118,7 +117,6 @@ async def close_ticket(callback: types.CallbackQuery):
 # --- ОБРАБОТКА РЕПЛАЯ АНКЕТОЛОГОВ (ОТВЕТ ИГРОКУ) ---
 @dp.message(F.reply_to_message)
 async def handle_mod_reply(message: types.Message):
-    # Проверяем, что сообщение написано в чате анкетологов и это не бот сам писал
     if message.chat.id != MODERATOR_CHAT_ID or message.from_user.is_bot:
         return
 
@@ -126,7 +124,6 @@ async def handle_mod_reply(message: types.Message):
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Ищем тикет по ID сообщения, на которое ответили
     cursor.execute("SELECT user_id, id FROM tickets WHERE mod_message_id = ?", (replied_msg_id,))
     row = cursor.fetchone()
     conn.close()
@@ -137,7 +134,6 @@ async def handle_mod_reply(message: types.Message):
     user_id, ticket_id = row
     admin_answer = message.text
 
-    # Отправляем ответ игроку в ЛС
     try:
         await bot.send_message(
             user_id,
@@ -150,7 +146,6 @@ async def handle_mod_reply(message: types.Message):
 # --- ЛОВИМ ТЕКСТ АНКЕТЫ ОТ ИГРОКА (ТОЛЬКО В ЛИЧКЕ) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
-    # Обрабатываем текст только в личных сообщениях
     if message.chat.type != "private":
         return
 
@@ -162,7 +157,6 @@ async def process_user_text(message: types.Message):
     ticket_text = message.text
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
 
-    # Сохраняем в базу
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -186,7 +180,6 @@ async def process_user_text(message: types.Message):
     ])
 
     try:
-        # Отправляем в чат анкетологов и сразу запоминаем ID отправленного сообщения
         sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
         
         conn = sqlite3.connect("bot_database.db")
@@ -196,8 +189,8 @@ async def process_user_text(message: types.Message):
         conn.close()
 
     except Exception as e:
-        print(f"Ошибка отправки в чат анкетологов: {e}")
-        return await message.answer("⚠️ Произошла ошибка при отправке анкеты модераторам. Убедитесь, что бот добавлен в чат анкетологов.")
+        print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
+        return await message.answer(f"⚠️ Ошибка отправки модераторам: {e}")
 
     await message.answer(
         "✅ Твоя анкета успешно отправлена анкетологам на проверку!\nОжидай ответа.",
