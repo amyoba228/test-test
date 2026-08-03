@@ -21,14 +21,23 @@ MODERATOR_CHAT_ID = "-1004456272439"
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
+    # Таблица тикетов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             username TEXT,
             text_content TEXT,
-            status TEXT DEFAULT 'pending',
-            mod_message_id INTEGER
+            status TEXT DEFAULT 'pending'
+        )
+    """)
+    # Таблица связей сообщений с тикетами для удобного ответов через Reply
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS message_map (
+            message_id INTEGER,
+            chat_id INTEGER,
+            ticket_id INTEGER,
+            PRIMARY KEY (message_id, chat_id)
         )
     """)
     conn.commit()
@@ -36,8 +45,23 @@ def init_db():
 
 init_db()
 
-# Временное хранилище для сбора анкет (текст, статьи, фото)
+# Временное хранилище для сбора новых анкет
 active_sessions = {}
+
+def map_message(message_id: int, chat_id: int, ticket_id: int):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO message_map (message_id, chat_id, ticket_id) VALUES (?, ?, ?)", (message_id, chat_id, ticket_id))
+    conn.commit()
+    conn.close()
+
+def get_ticket_by_message(message_id: int, chat_id: int):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticket_id FROM message_map WHERE message_id = ? AND chat_id = ?", (message_id, chat_id))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 # --- КЛАВИАТУРЫ ---
 def get_home_keyboard():
@@ -53,7 +77,6 @@ def get_finish_keyboard():
 
 # --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ДЛИННЫХ СООБЩЕНИЙ ---
 async def send_long_message(chat_id, text, reply_markup=None):
-    """Безопасная отправка текста длиннее 4000 символов (разбивает на части)"""
     max_length = 4000
     if len(text) <= max_length:
         return await bot.send_message(chat_id, text, reply_markup=reply_markup)
@@ -61,7 +84,6 @@ async def send_long_message(chat_id, text, reply_markup=None):
     chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
     sent_msg = None
     for idx, chunk in enumerate(chunks):
-        # Кнопку прикрепляем только к последней части сообщения
         markup = reply_markup if idx == len(chunks) - 1 else None
         sent_msg = await bot.send_message(chat_id, chunk, reply_markup=markup)
     return sent_msg
@@ -104,7 +126,7 @@ async def start_submit(callback: types.CallbackQuery):
         pass
     await callback.answer()
 
-# --- КОМАНДА /myid (УЗНАТЬ АЙДИ ЧАТА) ---
+# --- КОМАНДА /myid ---
 @dp.message(Command("myid"))
 async def cmd_myid(message: types.Message):
     await message.answer(f"📌 ID этого чата: `{message.chat.id}`")
@@ -150,8 +172,8 @@ async def view_ticket_button(callback: types.CallbackQuery):
         return await callback.answer("Тикет не найден или уже удален!", show_alert=True)
 
     user_id, username, text_content, status = row
-    
     status_text = "🟢 Активен" if status == "pending" else "❌ Закрыт"
+    
     response_text = (
         f"📄 **Информация по тикету #{ticket_id}**\n"
         f"👤 Игрок: {username} (ID: `{user_id}`)\n"
@@ -163,7 +185,10 @@ async def view_ticket_button(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="❌ Закрыть этот тикет", callback_data=f"close_ticket:{ticket_id}")]
     ])
 
-    await send_long_message(callback.message.chat.id, response_text, reply_markup=kb)
+    sent_msg = await send_long_message(callback.message.chat.id, response_text, reply_markup=kb)
+    if sent_msg:
+        map_message(sent_msg.message_id, int(MODERATOR_CHAT_ID), ticket_id)
+
     await callback.answer()
 
 # --- ЗАКРЫТИЕ ТИКЕТА КНОПКОЙ ---
@@ -173,8 +198,20 @@ async def close_ticket(callback: types.CallbackQuery):
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (ticket_id,))
-    conn.commit()
+    cursor.execute("SELECT user_id, status FROM tickets WHERE id = ?", (ticket_id,))
+    row = cursor.fetchone()
+    
+    if row and row[1] == 'pending':
+        user_id = row[0]
+        cursor.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (ticket_id,))
+        conn.commit()
+
+        # Уведомляем игрока о закрытии тикета
+        try:
+            await bot.send_message(user_id, f"🔒 **Ваша анкета (Тикет #{ticket_id}) закрыта анкетологами.** Переписка завершена.")
+        except Exception:
+            pass
+
     conn.close()
 
     try:
@@ -187,36 +224,48 @@ async def close_ticket(callback: types.CallbackQuery):
 
     await callback.answer("Тикет успешно закрыт!", show_alert=True)
 
-# --- ОБРАБОТКА РЕПЛАЯ АНКЕТОЛОГОВ (ОТВЕТ ИГРОКУ) ---
+# --- ДВУСТОРОННЯЯ ПЕРЕПИСКА ---
+
+# 1. Ответ модератора игроку (через Reply на любое сообщение, связанное с тикетом)
 @dp.message(F.reply_to_message)
 async def handle_mod_reply(message: types.Message):
     if str(message.chat.id) != str(MODERATOR_CHAT_ID) or message.from_user.is_bot:
         return
 
     replied_msg_id = message.reply_to_message.message_id
+    ticket_id = get_ticket_by_message(replied_msg_id, message.chat.id)
+
+    if not ticket_id:
+        return await message.reply("⚠️ Не удалось найти тикет, привязанный к этому сообщению.")
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, id FROM tickets WHERE mod_message_id = ?", (replied_msg_id,))
+    cursor.execute("SELECT user_id, status FROM tickets WHERE id = ?", (ticket_id,))
     row = cursor.fetchone()
     conn.close()
 
-    if not row:
-        return await message.reply("⚠️ Не удалось найти тикет, привязанный к этому сообщению.")
+    if not row or row[1] != 'pending':
+        return await message.reply("⚠️ Этот тикет уже закрыт, переписка недоступна.")
 
-    user_id, ticket_id = row
+    user_id = row[0]
     admin_answer = message.text
 
     try:
-        await bot.send_message(
+        sent_to_user = await bot.send_message(
             user_id,
-            f"📬 **Ответ от анкетологов по вашей анкете (Тикет #{ticket_id}):**\n\n{admin_answer}"
+            f"📬 **Ответ от анкетологов (Тикет #{ticket_id}):**\n\n{admin_answer}"
         )
+        # Мапим сообщение у пользователя, чтобы он мог ответить на него через реплай (опционально)
+        map_message(sent_to_user.message_id, user_id, ticket_id)
+        
+        # Также замапим ответ модератора в чате модераторов
+        map_message(message.message_id, int(MODERATOR_CHAT_ID), ticket_id)
+        
         await message.reply("✅ Ответ успешно доставлен игроку!")
     except Exception as e:
-        await message.reply(f"⚠️ Не удалось отправить сообщение игроку (возможно, он заблокировал бота). Ошибка: {e}")
+        await message.reply(f"⚠️ Не удалось отправить сообщение игроку: {e}")
 
-# --- СБОР ТЕКСТА И СТАТЕЙ ТЕЛЕГРАМ ОТ ИГРОКА ---
+# 2. Обработка текстовых сообщений от игрока (Сбор анкеты ИЛИ переписка в активном тикете)
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
     if message.chat.type != "private":
@@ -224,10 +273,34 @@ async def process_user_text(message: types.Message):
 
     user_id = message.from_user.id
     
+    # Сценарий А: Игрок заполняет анкету
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
         active_sessions[user_id]["messages"].append(message.text)
         await message.answer("➕ Материал (текст / статья) успешно добавлен! Можешь отправить ещё или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
+
+    # Сценарий Б: У игрока есть активный тикет — отправляем сообщение модераторам
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND status = 'pending'", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        ticket_id = row[0]
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+        forward_text = f"💬 **Сообщение от игрока {username}** (Тикет #{ticket_id}):\n\n{message.text}"
+        
+        try:
+            sent_to_mod = await bot.send_message(MODERATOR_CHAT_ID, forward_text)
+            map_message(sent_to_mod.message_id, int(MODERATOR_CHAT_ID), ticket_id)
+            await message.answer("✅ Ваше сообщение отправлено анкетологам.")
+        except Exception as e:
+            await message.answer(f"⚠️ Ошибка отправки сообщения модераторам: {e}")
+        return
+
+    # Сценарий В: Нет ни сессии, ни активного тикета
+    await message.answer("Нажми кнопку ниже, чтобы отправить анкету:", reply_markup=get_home_keyboard())
 
 # --- СБОР ФОТОГРАФИЙ ОТ ИГРОКА (ДО 3 ШТУК) ---
 @dp.message(F.photo)
@@ -294,7 +367,6 @@ async def finish_submit(callback: types.CallbackQuery):
     ])
 
     try:
-        # 1. Сначала отправляем фотографии альбомом (если они есть)
         if photos:
             media = []
             for i, p_id in enumerate(photos):
@@ -305,14 +377,9 @@ async def finish_submit(callback: types.CallbackQuery):
             
             await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
 
-        # 2. Затем отправляем текст (даже если он очень длинный, он безопасно разобьется на части)
         sent_msg = await send_long_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
-        
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
-        conn.commit()
-        conn.close()
+        if sent_msg:
+            map_message(sent_msg.message_id, int(MODERATOR_CHAT_ID), ticket_id)
 
     except Exception as e:
         print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
@@ -320,8 +387,8 @@ async def finish_submit(callback: types.CallbackQuery):
 
     try:
         await callback.message.edit_text(
-            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nОжидай ответа.",
-            reply_markup=get_home_keyboard()
+            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nТеперь вы можете общаться с модераторами в этом чате до закрытия тикета.",
+            reply_markup=None
         )
     except Exception:
         pass
