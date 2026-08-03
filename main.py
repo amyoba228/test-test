@@ -14,8 +14,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Сюда мы временно вставили старый ID. 
-# Как только узнаешь правильный через подсказку в чате, заменишь его здесь.
+# Сюда вставьте правильный ID группы после того, как узнаете его через команду /myid
 MODERATOR_CHAT_ID = -4456272439  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
@@ -72,6 +71,11 @@ async def start_submit(callback: types.CallbackQuery):
     )
     active_sessions[callback.from_user.id] = {"step": "waiting_ticket_text"}
     await callback.answer()
+
+# --- КОМАНДА /myid (УЗНАТЬ АЙДИ ЧАТА) ---
+@dp.message(Command("myid"))
+async def cmd_myid(message: types.Message):
+    await message.answer(f"📌 ID этого чата: `{message.chat.id}`")
 
 # --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ ---
 @dp.message(Command("list"))
@@ -197,12 +201,6 @@ async def process_user_text(message: types.Message):
         "✅ Твоя анкета успешно отправлена анкетологам на проверку!\nОжидай ответа.",
         reply_markup=get_home_keyboard()
     )
-
-# --- ПОМОЩНИК: ВЫВОД АЙДИ В САМОЙ ГРУППЕ ---
-@dp.message()
-async def show_chat_id(message: types.Message):
-    if message.chat.type in ["group", "supergroup"]:
-        await message.answer(f"📌 Айди этого чата: `{message.chat.id}`")
 
 
 async def main():
