@@ -51,6 +51,21 @@ def get_finish_keyboard():
         [InlineKeyboardButton(text="❌ Отменить", callback_data="go_home")]
     ])
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ДЛИННЫХ СООБЩЕНИЙ ---
+async def send_long_message(chat_id, text, reply_markup=None):
+    """Безопасная отправка текста длиннее 4000 символов (разбивает на части)"""
+    max_length = 4000
+    if len(text) <= max_length:
+        return await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    
+    chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+    sent_msg = None
+    for idx, chunk in enumerate(chunks):
+        # Кнопку прикрепляем только к последней части сообщения
+        markup = reply_markup if idx == len(chunks) - 1 else None
+        sent_msg = await bot.send_message(chat_id, chunk, reply_markup=markup)
+    return sent_msg
+
 # --- КОМАНДА СТАРТ И ГЛАВНОЕ МЕНЮ ---
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -148,7 +163,7 @@ async def view_ticket_button(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="❌ Закрыть этот тикет", callback_data=f"close_ticket:{ticket_id}")]
     ])
 
-    await callback.message.answer(response_text, reply_markup=kb)
+    await send_long_message(callback.message.chat.id, response_text, reply_markup=kb)
     await callback.answer()
 
 # --- ЗАКРЫТИЕ ТИКЕТА КНОПКОЙ ---
@@ -290,8 +305,8 @@ async def finish_submit(callback: types.CallbackQuery):
             
             await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
 
-        # 2. Затем отправляем текст и ссылки на телеграм-статьи с кнопкой закрытия тикета
-        sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
+        # 2. Затем отправляем текст (даже если он очень длинный, он безопасно разобьется на части)
+        sent_msg = await send_long_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
         
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
