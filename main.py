@@ -70,20 +70,23 @@ async def go_home(callback: types.CallbackQuery):
     try:
         await callback.message.edit_text(text, reply_markup=get_home_keyboard())
     except Exception:
-        await callback.message.answer(text, reply_markup=get_home_keyboard())
+        pass
     await callback.answer()
 
 @dp.callback_query(F.data == "start_submit")
 async def start_submit(callback: types.CallbackQuery):
     active_sessions[callback.from_user.id] = {"step": "collecting", "messages": [], "photos": []}
-    await callback.message.edit_text(
-        "✍️ Отправляй свою анкету частями:\n"
-        "• Текстовые сообщения\n"
-        "• **Статьи Telegram** (ссылки на статьи)\n"
-        "• **До 3 фотографий**\n\n"
-        "Можешь отправлять их вперемешку. Когда закончишь, нажми кнопку ниже:",
-        reply_markup=get_finish_keyboard()
-    )
+    try:
+        await callback.message.edit_text(
+            "✍️ Отправляй свою анкету частями:\n"
+            "• Текстовые сообщения\n"
+            "• **Статьи Telegram** (ссылки на статьи)\n"
+            "• **До 3 фотографий**\n\n"
+            "Можешь отправлять их вперемешку. Когда закончишь, нажми кнопку ниже:",
+            reply_markup=get_finish_keyboard()
+        )
+    except Exception:
+        pass
     await callback.answer()
 
 # --- КОМАНДА /myid (УЗНАТЬ АЙДИ ЧАТА) ---
@@ -207,13 +210,7 @@ async def process_user_text(message: types.Message):
     user_id = message.from_user.id
     
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
-        # Если игрок прислал ссылку на телеграм-статью или обычный текст
-        content = message.text
-        if message.entities:
-            # Можно дополнительно обрабатывать сущности, если нужно, но текст со ссылкой подхватится автоматически
-            pass
-
-        active_sessions[user_id]["messages"].append(content)
+        active_sessions[user_id]["messages"].append(message.text)
         await message.answer("➕ Материал (текст / статья) успешно добавлен! Можешь отправить ещё или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
@@ -241,7 +238,7 @@ async def process_user_photo(message: types.Message):
         await message.answer(f"📸 Фото принято ({count}/3)! Можешь отправить еще материалы или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ МОДЕРАТОРАМ (СНАЧАЛА ФОТО, ПОТОМ ТЕКСТ/СТАТЬИ) ---
+# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ МОДЕРАТОРАМ ---
 @dp.callback_query(F.data == "finish_submit")
 async def finish_submit(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -306,10 +303,14 @@ async def finish_submit(callback: types.CallbackQuery):
         print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
         return await callback.message.edit_text(f"⚠️ Ошибка отправки модераторам: {e}")
 
-    await callback.message.edit_text(
-        "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nОжидай ответа.",
-        reply_markup=get_home_keyboard()
-    )
+    try:
+        await callback.message.edit_text(
+            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nОжидай ответа.",
+            reply_markup=get_home_keyboard()
+        )
+    except Exception:
+        pass
+        
     await callback.answer()
 
 
