@@ -37,7 +37,6 @@ def init_db():
 init_db()
 
 # Временное хранилище для сбора анкет (текст + фото)
-# {user_id: {"step": "collecting", "messages": [], "photos": []}}
 active_sessions = {}
 
 # --- КЛАВИАТУРЫ ---
@@ -247,7 +246,6 @@ async def finish_submit(callback: types.CallbackQuery):
     if not session["messages"] and not session["photos"]:
         return await callback.answer("Ты не отправил ни текста, ни фотографий!", show_alert=True)
 
-    # Объединяем весь текст
     full_ticket_text = "\n\n".join(session["messages"]) if session["messages"] else "(Без текста)"
     photos = session["photos"]
     
@@ -264,7 +262,6 @@ async def finish_submit(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    # Удаляем сессию
     del active_sessions[user_id]
 
     mod_text = (
@@ -278,20 +275,23 @@ async def finish_submit(callback: types.CallbackQuery):
     ])
 
     try:
-        # 1. Сначала отправляем текст анкеты с кнопкой закрытия
         sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
         
-        # Записываем ID этого сообщения, чтобы работали реплаи
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
         conn.commit()
         conn.close()
 
-        # 2. Если есть фотографии, отправляем их следом красивой группой
+        # Если есть фотографии, отправляем их группой с подписью на первом фото
         if photos:
-            media = [InputMediaPhoto(media=p_id) for p_id in photos]
-            media[0].caption = f"🖼 Фотографии к тикету #{ticket_id}"
+            media = []
+            for i, p_id in enumerate(photos):
+                if i == 0:
+                    media.append(InputMediaPhoto(media=p_id, caption=f"🖼 Фотографии к тикету #{ticket_id}"))
+                else:
+                    media.append(InputMediaPhoto(media=p_id))
+            
             await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
 
     except Exception as e:
