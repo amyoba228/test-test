@@ -222,11 +222,9 @@ async def process_user_photo(message: types.Message):
         if len(session["photos"]) >= 3:
             return await message.answer("⚠️ Можно загрузить максимум 3 фотографии!", reply_markup=get_finish_keyboard())
         
-        # Берем фото в самом высоком разрешении
         photo_id = message.photo[-1].file_id
         session["photos"].append(photo_id)
 
-        # Если к фотке была прикреплена подпись (текст), тоже сохраняем её
         if message.caption:
             session["messages"].append(message.caption)
 
@@ -275,15 +273,7 @@ async def finish_submit(callback: types.CallbackQuery):
     ])
 
     try:
-        sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
-        
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
-        conn.commit()
-        conn.close()
-
-        # Если есть фотографии, отправляем их группой с подписью на первом фото
+        # 1. Сначала отправляем фотографии (если они есть)
         if photos:
             media = []
             for i, p_id in enumerate(photos):
@@ -293,6 +283,15 @@ async def finish_submit(callback: types.CallbackQuery):
                     media.append(InputMediaPhoto(media=p_id))
             
             await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
+
+        # 2. Затем отправляем текст анкеты с кнопкой закрытия и сохраняем его ID для реплаев
+        sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
+        
+        conn = sqlite3.connect("bot_database.db")
+        cursor = conn.cursor()
+        cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
+        conn.commit()
+        conn.close()
 
     except Exception as e:
         print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
