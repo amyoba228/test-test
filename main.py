@@ -3,7 +3,7 @@ import os
 import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 
 # Токен берется из переменных окружения хостинга
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -14,7 +14,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ID чата анкетологов (в кавычках, как вам удобно)
+# ID чата анкетологов (в кавычках)
 MODERATOR_CHAT_ID = "-1004456272439"  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
@@ -36,8 +36,8 @@ def init_db():
 
 init_db()
 
-# Временное хранилище для сбора анкет
-# {user_id: {"messages": [текст1, текст2, ...], "step": "collecting"}}
+# Временное хранилище для сбора анкет (текст + фото)
+# {user_id: {"step": "collecting", "messages": [], "photos": []}}
 active_sessions = {}
 
 # --- КЛАВИАТУРЫ ---
@@ -76,9 +76,9 @@ async def go_home(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "start_submit")
 async def start_submit(callback: types.CallbackQuery):
-    active_sessions[callback.from_user.id] = {"step": "collecting", "messages": []}
+    active_sessions[callback.from_user.id] = {"step": "collecting", "messages": [], "photos": []}
     await callback.message.edit_text(
-        "✍️ Отправляй свою анкету **любым количеством сообщений** (абзацами, частями).\n\n"
+        "✍️ Отправляй свою анкету **любым количеством текстовых сообщений** и прикрепляй **до 3 фотографий** (по одной или с текстом).\n\n"
         "Когда закончишь отправлять всё, нажми кнопку ниже:",
         reply_markup=get_finish_keyboard()
     )
@@ -92,13 +92,11 @@ async def cmd_myid(message: types.Message):
 # --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ (С КНОПКАМИ ДО 5 ШТУК) ---
 @dp.message(Command("list"))
 async def mod_list_tickets(message: types.Message):
-    # Приводим к строке на случай сравнения с минусом
     if str(message.chat.id) != str(MODERATOR_CHAT_ID):
         return
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Берем максимум 5 активных тикетов
     cursor.execute("SELECT id, username FROM tickets WHERE status = 'pending' LIMIT 5")
     tickets = cursor.fetchall()
     conn.close()
@@ -198,7 +196,7 @@ async def handle_mod_reply(message: types.Message):
     except Exception as e:
         await message.reply(f"⚠️ Не удалось отправить сообщение игроку (возможно, он заблокировал бота). Ошибка: {e}")
 
-# --- СБОР ЧАСТЕЙ АНКЕТЫ ОТ ИГРОКА ---
+# --- СБОР ТЕКСТА АНКЕТЫ ОТ ИГРОКА ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
     if message.chat.type != "private":
@@ -206,23 +204,53 @@ async def process_user_text(message: types.Message):
 
     user_id = message.from_user.id
     
-    # Если пользователь находится в процессе сбора анкеты
     if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
-        # Сохраняем текстовую часть сообщения
         active_sessions[user_id]["messages"].append(message.text)
-        await message.answer("➕ Часть анкеты принята! Можешь отправить следующую часть или нажать кнопку «Всё, отправить анкету» в предыдущем сообщении.", reply_markup=get_finish_keyboard())
+        await message.answer("➕ Текст принят! Можешь отправить еще текст или фото, либо нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ МОДЕРАТОРАМ ---
+# --- СБОР ФОТОГРАФИЙ ОТ ИГРОКА (ДО 3 ШТУК) ---
+@dp.message(F.photo)
+async def process_user_photo(message: types.Message):
+    if message.chat.type != "private":
+        return
+
+    user_id = message.from_user.id
+
+    if user_id in active_sessions and active_sessions[user_id].get("step") == "collecting":
+        session = active_sessions[user_id]
+        
+        if len(session["photos"]) >= 3:
+            return await message.answer("⚠️ Можно загрузить максимум 3 фотографии!", reply_markup=get_finish_keyboard())
+        
+        # Берем фото в самом высоком разрешении
+        photo_id = message.photo[-1].file_id
+        session["photos"].append(photo_id)
+
+        # Если к фотке была прикреплена подпись (текст), тоже сохраняем её
+        if message.caption:
+            session["messages"].append(message.caption)
+
+        count = len(session["photos"])
+        await message.answer(f"📸 Фото принято ({count}/3)! Можешь отправить еще фото/текст или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
+        return
+
+# --- ФИНАЛ: ОТПРАВКА СОБРАННОЙ АНКЕТЫ И ФОТО МОДЕРАТОРАМ ---
 @dp.callback_query(F.data == "finish_submit")
 async def finish_submit(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
-    if user_id not in active_sessions or not active_sessions[user_id]["messages"]:
-        return await callback.answer("Ты еще не отправил ни одной части анкеты!", show_alert=True)
+    if user_id not in active_sessions:
+        return await callback.answer("Сессия не найдена, начни заново.", show_alert=True)
 
-    # Объединяем все сообщения в один большой текст через пустые строки
-    full_ticket_text = "\n\n".join(active_sessions[user_id]["messages"])
+    session = active_sessions[user_id]
+    if not session["messages"] and not session["photos"]:
+        return await callback.answer("Ты не отправил ни текста, ни фотографий!", show_alert=True)
+
+    # Объединяем весь текст
+    full_ticket_text = "\n\n".join(session["messages"]) if session["messages"] else "(Без текста)"
+    photos = session["photos"]
+    
     username = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
 
     # Сохраняем в базу данных
@@ -250,20 +278,28 @@ async def finish_submit(callback: types.CallbackQuery):
     ])
 
     try:
+        # 1. Сначала отправляем текст анкеты с кнопкой закрытия
         sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
         
+        # Записываем ID этого сообщения, чтобы работали реплаи
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
         conn.commit()
         conn.close()
 
+        # 2. Если есть фотографии, отправляем их следом красивой группой
+        if photos:
+            media = [InputMediaPhoto(media=p_id) for p_id in photos]
+            media[0].caption = f"🖼 Фотографии к тикету #{ticket_id}"
+            await bot.send_media_group(MODERATOR_CHAT_ID, media=media)
+
     except Exception as e:
         print(f"❌ ОШИБКА ОТПРАВКИ В ЧАТ МОДЕРАТОРОВ: {repr(e)}")
         return await callback.message.edit_text(f"⚠️ Ошибка отправки модераторам: {e}")
 
     await callback.message.edit_text(
-        "✅ Твоя анкета (состоящая из всех частей) успешно отправлена анкетологам на проверку!\nОжидай ответа.",
+        "✅ Твоя анкета и фотографии успешно отправлены анкетологам на проверку!\nОжидай ответа.",
         reply_markup=get_home_keyboard()
     )
     await callback.answer()
