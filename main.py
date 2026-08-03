@@ -259,7 +259,6 @@ async def cmd_ban(message: types.Message):
     target_user_id = None
     target_username = None
 
-    # Способ 1: Реплаем на сообщение
     if message.reply_to_message:
         replied_msg_id = message.reply_to_message.message_id
         ticket_id = get_ticket_by_message(replied_msg_id, message.chat.id)
@@ -272,37 +271,28 @@ async def cmd_ban(message: types.Message):
             if row:
                 target_user_id, target_username = row[0], row[1]
     
-    # Способ 2: Через аргумент (@юзернейм или ID)
     elif len(parts) > 1:
         arg = parts[1]
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         if arg.startswith("@"):
             cursor.execute("SELECT user_id, username FROM tickets WHERE username = ? ORDER BY id DESC LIMIT 1", (arg,))
+            row = cursor.fetchone()
+            if row:
+                target_user_id, target_username = row[0], row[1]
         elif arg.isdigit():
             target_user_id = int(arg)
             cursor.execute("SELECT username FROM tickets WHERE user_id = ? ORDER BY id DESC LIMIT 1", (target_user_id,))
             res = cursor.fetchone()
             target_username = res[0] if res else f"ID: {target_user_id}"
-        
-        row = cursor.fetchone() if arg.startswith("@") else None
-        if row:
-            target_user_id, target_username = row[0], row[1]
         conn.close()
 
     if not target_user_id:
         return await message.reply("⚠️ Не удалось определить пользователя. Укажите @юзернейм, ID или сделайте Reply на его тикет/сообщение.")
 
-    # Заносим в базу забаненных
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO banned_users (user_id, username, reason) VALUES (?, ?, ?)", (target_user_id, str(target_username), reason))
-    conn.commit()
-    conn.close()
-
-    # Закрываем активный тикет пользователя, если он был
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
     cursor.execute("UPDATE tickets SET status = 'closed' WHERE user_id = ? AND status = 'pending'", (target_user_id,))
     conn.commit()
     conn.close()
@@ -319,7 +309,6 @@ async def cmd_ban(message: types.Message):
 async def cmd_unban(message: types.Message):
     parts = message.text.split(maxsplit=1)
     target_user_id = None
-    target_identifier = None
 
     if message.reply_to_message:
         replied_msg_id = message.reply_to_message.message_id
@@ -530,4 +519,16 @@ async def finish_submit(callback: types.CallbackQuery):
     mod_text = (
         f"📥 **Новая анкета / статья на проверку!** (Тикет #{ticket_id})\n"
         f"👤 От: {username} (ID: `{user_id}`)\n\n"
-    
+        f"{full_ticket_text}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"close_ticket:{ticket_id}")]
+    ])
+
+    try:
+        if photos:
+            media = []
+            for i, p_id in enumerate(photos):
+                if i == 0:
+                    media.app
