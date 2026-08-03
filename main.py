@@ -14,15 +14,13 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ID чата анкетологов
-MODERATOR_CHAT_ID = -4456272439  # Если это супергруппа/группа в Telegram, ID обычно идет с минусом. 
-# Если бот будет ругаться или не слать туда, проверь, добавлен ли бот в этот чат и имеет ли права администратора.
+# ID чата анкетологов (обязательно с минусом, если это супергруппа/группа)
+MODERATOR_CHAT_ID = -4456272439  
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ SQLite ---
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Таблица для анкет на проверку
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,72 +72,12 @@ async def start_submit(callback: types.CallbackQuery):
     active_sessions[callback.from_user.id] = {"step": "waiting_ticket_text"}
     await callback.answer()
 
-# --- ЛОВИМ ТЕКСТ АНКЕТЫ ОТ ИГРОКА ---
-@dp.message(F.text)
-async def process_user_text(message: types.Message):
-    user_id = message.from_user.id
-    
-    if user_id not in active_sessions or active_sessions.get(user_id, {}).get("step") != "waiting_ticket_text":
-        return
-
-    ticket_text = message.text
-    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
-
-    # Сохраняем во временную базу со статусом pending (ожидает)
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO tickets (user_id, username, text_content, status) VALUES (?, ?, ?, 'pending')",
-        (user_id, username, ticket_text)
-    )
-    ticket_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    del active_sessions[user_id]
-
-    # Формируем сообщение для чата анкетологов
-    mod_text = (
-        f"📥 **Новая анкета на проверку!** (Тикет #{ticket_id})\n"
-        f"👤 От: {username} (ID: `{user_id}`)\n\n"
-        f"{ticket_text}"
-    )
-
-    # Кнопки под сообщением в чате анкетологов
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"close_ticket:{ticket_id}")]
-    ])
-
-    try:
-        # Отправляем в чат анкетологов
-        sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
-        
-        # Записываем ID сообщения в чате модераторов, чтобы потом знать, к какому тикету относится реплай
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
-        conn.commit()
-        conn.close()
-
-    except Exception as e:
-        print(f"Ошибка отправки в чат анкетологов: {e}")
-        return await message.answer("⚠️ Произошла ошибка при отправке анкеты модераторам. Убедитесь, что бот добавлен в чат анкетологов.")
-
-    # Уведомляем игрока
-    await message.answer(
-        "✅ Твоя анкета успешно отправлена анкетологам на проверку!\nОжидай ответа.",
-        reply_markup=get_home_keyboard()
-    )
-
-
-# --- ФУНКЦИИ В ЧАТЕ АНКЕТОЛОГОВ ---
-
-# 1. Кнопка "Посмотреть список анкет на проверку" (можно отправлять командой /list в чате анкетологов)
+# --- КОМАНДА /list ДЛЯ АНКЕТОЛОГОВ ---
 @dp.message(Command("list"))
 async def mod_list_tickets(message: types.Message):
-    # Проверяем, что команда вызвана в чате анкетологов (или разрешаем админам)
-    if message.chat.id != MODERATOR_CHAT_ID and message.chat.type == "private":
-        return await message.answer("Эта команда доступна только в чате анкетологов.")
+    # Проверяем, что команда вызвана в чате анкетологов
+    if message.chat.id != MODERATOR_CHAT_ID:
+        return
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -156,7 +94,7 @@ async def mod_list_tickets(message: types.Message):
     
     await message.answer(text)
 
-# 2. Закрытие тикета кнопкой
+# --- ЗАКРЫТИЕ ТИКЕТА КНОПКОЙ ---
 @dp.callback_query(F.data.startswith("close_ticket:"))
 async def close_ticket(callback: types.CallbackQuery):
     ticket_id = int(callback.data.split(":")[1])
@@ -168,7 +106,6 @@ async def close_ticket(callback: types.CallbackQuery):
     conn.close()
 
     try:
-        # Убираем кнопку и пишем, что тикет закрыт
         await callback.message.edit_text(
             f"{callback.message.text}\n\n❌ **[ТИКЕТ ЗАКРЫТ]**", 
             reply_markup=None
@@ -176,27 +113,26 @@ async def close_ticket(callback: types.CallbackQuery):
     except Exception:
         pass
 
-    await callback.answer("Тикет успешно закрыт и удален из активных!", show_alert=True)
+    await callback.answer("Тикет успешно закрыт!", show_alert=True)
 
-
-# 3. Обработка реплая анкетологов (ответ игроку)
+# --- ОБРАБОТКА РЕПЛАЯ АНКЕТОЛОГОВ (ОТВЕТ ИГРОКУ) ---
 @dp.message(F.reply_to_message)
 async def handle_mod_reply(message: types.Message):
-    # Проверяем, что сообщение написано в чате анкетологов
-    if message.chat.id != MODERATOR_CHAT_ID:
+    # Проверяем, что сообщение написано в чате анкетологов и это не бот сам писал
+    if message.chat.id != MODERATOR_CHAT_ID or message.from_user.is_bot:
         return
 
     replied_msg_id = message.reply_to_message.message_id
 
-    # Ищем в базе тикет по ID сообщения в чате модераторов
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, id FROM tickets WHERE mod_message_id = ? AND status = 'pending'", (replied_msg_id,))
+    # Ищем тикет по ID сообщения, на которое ответили
+    cursor.execute("SELECT user_id, id FROM tickets WHERE mod_message_id = ?", (replied_msg_id,))
     row = cursor.fetchone()
     conn.close()
 
     if not row:
-        return  # Если это реплай не на активный тикет, просто игнорируем
+        return await message.reply("⚠️ Не удалось найти тикет, привязанный к этому сообщению.")
 
     user_id, ticket_id = row
     admin_answer = message.text
@@ -207,13 +143,70 @@ async def handle_mod_reply(message: types.Message):
             user_id,
             f"📬 **Ответ от анкетологов по вашей анкете (Тикет #{ticket_id}):**\n\n{admin_answer}"
         )
-        await message.reply(f"✅ Ответ успешно доставлен игроку!")
+        await message.reply("✅ Ответ успешно доставлен игроку!")
     except Exception as e:
         await message.reply(f"⚠️ Не удалось отправить сообщение игроку (возможно, он заблокировал бота). Ошибка: {e}")
 
+# --- ЛОВИМ ТЕКСТ АНКЕТЫ ОТ ИГРОКА (ТОЛЬКО В ЛИЧКЕ) ---
+@dp.message(F.text & ~F.text.startswith("/"))
+async def process_user_text(message: types.Message):
+    # Обрабатываем текст только в личных сообщениях
+    if message.chat.type != "private":
+        return
+
+    user_id = message.from_user.id
+    
+    if user_id not in active_sessions or active_sessions.get(user_id, {}).get("step") != "waiting_ticket_text":
+        return
+
+    ticket_text = message.text
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+
+    # Сохраняем в базу
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO tickets (user_id, username, text_content, status) VALUES (?, ?, ?, 'pending')",
+        (user_id, username, ticket_text)
+    )
+    ticket_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    del active_sessions[user_id]
+
+    mod_text = (
+        f"📥 **Новая анкета на проверку!** (Тикет #{ticket_id})\n"
+        f"👤 От: {username} (ID: `{user_id}`)\n\n"
+        f"{ticket_text}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"close_ticket:{ticket_id}")]
+    ])
+
+    try:
+        # Отправляем в чат анкетологов и сразу запоминаем ID отправленного сообщения
+        sent_msg = await bot.send_message(MODERATOR_CHAT_ID, mod_text, reply_markup=kb)
+        
+        conn = sqlite3.connect("bot_database.db")
+        cursor = conn.cursor()
+        cursor.execute("UPDATE tickets SET mod_message_id = ? WHERE id = ?", (sent_msg.message_id, ticket_id))
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        print(f"Ошибка отправки в чат анкетологов: {e}")
+        return await message.answer("⚠️ Произошла ошибка при отправке анкеты модераторам. Убедитесь, что бот добавлен в чат анкетологов.")
+
+    await message.answer(
+        "✅ Твоя анкета успешно отправлена анкетологам на проверку!\nОжидай ответа.",
+        reply_markup=get_home_keyboard()
+    )
+
 
 async def main():
-    print("Бот с системой тикетов для анкетологов запущен!")
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
