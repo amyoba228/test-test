@@ -31,7 +31,7 @@ def init_db():
             status TEXT DEFAULT 'pending'
         )
     """)
-    # Таблица связей сообщений с тикетами для удобного ответов через Reply
+    # Таблица связей сообщений с тикетами для двустороннего Reply
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS message_map (
             message_id INTEGER,
@@ -224,12 +224,13 @@ async def close_ticket(callback: types.CallbackQuery):
 
     await callback.answer("Тикет успешно закрыт!", show_alert=True)
 
-# --- ДВУСТОРОННЯЯ ПЕРЕПИСКА ---
 
-# 1. Ответ модератора игроку (через Reply на любое сообщение, связанное с тикетом)
-@dp.message(F.reply_to_message)
+# --- ДВУСТОРОННЯЯ ПЕРЕПИСКА ЧЕРЕЗ REPLY ---
+
+# 1. Ответ МОДЕРАТОРА игроку (через Reply в чате модераторов)
+@dp.message(F.reply_to_message & (F.chat.id == int(MODERATOR_CHAT_ID)))
 async def handle_mod_reply(message: types.Message):
-    if str(message.chat.id) != str(MODERATOR_CHAT_ID) or message.from_user.is_bot:
+    if message.from_user.is_bot:
         return
 
     replied_msg_id = message.reply_to_message.message_id
@@ -255,17 +256,51 @@ async def handle_mod_reply(message: types.Message):
             user_id,
             f"📬 **Ответ от анкетологов (Тикет #{ticket_id}):**\n\n{admin_answer}"
         )
-        # Мапим сообщение у пользователя, чтобы он мог ответить на него через реплай (опционально)
+        # Сохраняем маппинг, чтобы игрок мог ответить реплаем на это сообщение
         map_message(sent_to_user.message_id, user_id, ticket_id)
-        
-        # Также замапим ответ модератора в чате модераторов
         map_message(message.message_id, int(MODERATOR_CHAT_ID), ticket_id)
         
         await message.reply("✅ Ответ успешно доставлен игроку!")
     except Exception as e:
         await message.reply(f"⚠️ Не удалось отправить сообщение игроку: {e}")
 
-# 2. Обработка текстовых сообщений от игрока (Сбор анкеты ИЛИ переписка в активном тикете)
+
+# 2. Ответ УЧАСТНИКА модераторам (через Reply в личных сообщениях с ботом)
+@dp.message(F.reply_to_message & F.chat.type.in_({"private"}))
+async def handle_user_reply(message: types.Message):
+    if message.from_user.is_bot or message.text.startswith("/"):
+        return
+
+    user_id = message.from_user.id
+    replied_msg_id = message.reply_to_message.message_id
+    ticket_id = get_ticket_by_message(replied_msg_id, user_id)
+
+    if not ticket_id:
+        return # Если человек реплаит на какое-то старое/стороннее сообщение, не относящееся к тикету
+
+    # Проверяем, активен ли еще тикет
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM tickets WHERE id = ? AND user_id = ?", (ticket_id, user_id))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row or row[0] != 'pending':
+        return await message.answer("⚠️ Этот тикет уже закрыт. Отправка сообщений недоступна.")
+
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+    forward_text = f"💬 **Ответ от игрока {username}** (Тикет #{ticket_id}):\n\n{message.text}"
+
+    try:
+        sent_to_mod = await bot.send_message(MODERATOR_CHAT_ID, forward_text)
+        # Мапим отправленное сообщение у модераторов, чтобы они могли ответить на него реплаем
+        map_message(sent_to_mod.message_id, int(MODERATOR_CHAT_ID), ticket_id)
+        await message.answer("✅ Ваше сообщение отправлено анкетологам.")
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка отправки модераторам: {e}")
+
+
+# 3. Обычный текст от игрока (Сбор анкеты ИЛИ обычное сообщение при активном тикете)
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_user_text(message: types.Message):
     if message.chat.type != "private":
@@ -279,7 +314,7 @@ async def process_user_text(message: types.Message):
         await message.answer("➕ Материал (текст / статья) успешно добавлен! Можешь отправить ещё или нажать кнопку отправки.", reply_markup=get_finish_keyboard())
         return
 
-    # Сценарий Б: У игрока есть активный тикет — отправляем сообщение модераторам
+    # Сценарий Б: У игрока есть активный тикет (если он пишет просто текстом без реплая)
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND status = 'pending'", (user_id,))
@@ -387,7 +422,7 @@ async def finish_submit(callback: types.CallbackQuery):
 
     try:
         await callback.message.edit_text(
-            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nТеперь вы можете общаться с модераторами в этом чате до закрытия тикета.",
+            "✅ Твоя анкета и статьи успешно отправлены анкетологам на проверку!\nТеперь вы можете отвечать на сообщения модераторов в этом чате до закрытия тикета.",
             reply_markup=None
         )
     except Exception:
